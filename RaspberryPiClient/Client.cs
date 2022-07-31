@@ -1,18 +1,17 @@
 ﻿using System;
-using System.Threading;
-using Iot.Device;
-using Microsoft.AspNetCore.SignalR.Client;
-using System.Net.Http;
-using System.Net;
-using Serilog;
-using System.Collections.Generic;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
-using System.Net.NetworkInformation;
-using System.Linq;
-using Newtonsoft.Json;
 using System.IO;
+using System.Net;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Text.RegularExpressions;
+using System.Net.NetworkInformation;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.SignalR.Client;
+using Newtonsoft.Json;
+using Serilog;
+using System.Net.Http;
+using System.Collections.Generic;
 
 namespace RaspberryPiClient
 {
@@ -37,20 +36,27 @@ namespace RaspberryPiClient
             this._hubConnection = hubConnection;
             this._refreshRate = refreshRate;
             this._hostName = SetHostName();
+            this._deviceName = SetDeviceName();
             this._macAddress = SetMacAddress();
             this._ipv4Address = SetIpAddress();
+            this._hubConnection.Closed -= OnConnectionClosedAsync;
+            this._hubConnection.Closed += OnConnectionClosedAsync;
+            this._hubConnection.Reconnected -= Connect;
+            this._hubConnection.Reconnected += Connect;
 
-            Log.Information("Client HostName/DeviceName: {HostName}", this._hostName);
+            Log.Information("Client HostName: {HostName}", this._hostName);
+            Log.Information("Client DeviceName: {DeviceName}", this._deviceName);
             Log.Information("Client IPv4 Address: {Ip}", this._ipv4Address);
             Log.Information("Client Mac Address: {Mac}", this._macAddress);
             Log.Information("Refresh Rate: {RefreshRate}", this._refreshRate);
-
         }
 
-        public async Task Connect()
+        public async Task Connect(string connectionId)
         {
+            this.Handshake = false;
+            Log.Information("Established connection to {ConnectedTo}", this._configuration.GetConnectionString("Hub"));
+            this._connectionId = connectionId;
             //listen
-            Log.Information("Connecting to Hub");
             try
             {
                 _hubConnection.On<string>("ReceivedMessage", (message) =>
@@ -83,37 +89,81 @@ namespace RaspberryPiClient
                     }
                 });
 
-                await _hubConnection.StartAsync();
-                
+
                 SaveClientSettings();
 
-                Log.Information("Sending connection signal to hub @ {Hub}",_configuration.GetConnectionString("Hub"));
+                Log.Information("Subscribing to {Hub}",_configuration.GetConnectionString("Hub"));
                 //Serialize class variables as json and send them to Hub
                 await _hubConnection.SendAsync("Subscribe", JsonConvert.SerializeObject(this));
             }
-            catch (Exception e)
+            catch (HttpRequestException e)
             {
                 Log.Error(e.ToString());
             }
         }
 
+        public async Task StartConnectionAsync()
+        {
+            try
+            {
 
-        //Task executing each X ms
+                //Try to start
+                if (this._hubConnection.State == HubConnectionState.Disconnected)
+                {
+                    await this._hubConnection.StartAsync();     
+                }
+
+                Log.Information("Client state: {State}",this._hubConnection.State);
+
+                //Listen when connected
+                if(this._hubConnection.State == HubConnectionState.Connected)
+                {
+                    await Connect(this._connectionId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Information("Client state: {State}",this._hubConnection.State);
+                await OnConnectionExceptionAsync(ex);
+            }
+        }
+
+        private async Task OnConnectionExceptionAsync(Exception exception)
+        {
+            await OnConnectionClosedAsync(exception);
+        }
+        private async Task OnConnectionClosedAsync(Exception ex)
+        {
+            await Task.Delay(2000);
+            await StartConnectionAsync();
+        }
+
+
+        //Task executing each X ms 
+        //if interval is set 0 it won't start
         #region Checker
         public void Checker()
         {
-            var autoEvent = new AutoResetEvent(false);
-            var stateTimer = new Timer(CheckStatus, autoEvent, this._refreshRate, 250);
+            if(this._refreshRate >0)
+            {
+                var autoEvent = new AutoResetEvent(false);
+                var stateTimer = new Timer(CheckStatus, autoEvent, this._refreshRate, 250);
 
-            stateTimer.Change(0, this._refreshRate);
+                stateTimer.Change(0, this._refreshRate);
+            }
         }
 
         public async void CheckStatus(Object stateInfo)
         {
             AutoResetEvent autoEvent = (AutoResetEvent)stateInfo;
             Log.Information("{0} Checking status...", DateTime.Now.ToString("h:mm:ss.fff"));
-            await _hubConnection.SendAsync("UpdateStatus", _connectionId);
+            if(this._hubConnection.State == HubConnectionState.Disconnected)
+            {
+                Log.Information("Disconnected");
 
+            }
+
+           // await _hubConnection.SendAsync("UpdateStatus", _connectionId);
         }
         #endregion
 
@@ -121,9 +171,12 @@ namespace RaspberryPiClient
         #region Access Methods
         public string SetHostName()
         {
-            String strHostName = string.Empty;
-            strHostName = Dns.GetHostName();
-            return strHostName;
+            return Dns.GetHostName();
+        } 
+        
+        public string SetDeviceName()
+        {
+            return Environment.MachineName;
         }
 
         public string SetIpAddress()
@@ -165,9 +218,10 @@ namespace RaspberryPiClient
             //Deserialize class instance and its values into json file
             string path = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             string json = JsonConvert.SerializeObject(this);
-            
+
+            //Save them in ClientSettings-DATE.json
             File.WriteAllText(Path.Combine(path,$"ClientSettings-{DateTime.Now.Year}{DateTime.Now.Month}{DateTime.Now.Day}.json"), json);
-            Log.Information(json);
+           // Log.Information(json);
         }
     }
 }
